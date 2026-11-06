@@ -1,0 +1,63 @@
+#pragma once
+
+#include "csg/Smc.h"
+#include "render/Camera.h"
+#include "render/Shader.h"
+
+#include <unordered_set>
+#include <vector>
+
+namespace render {
+
+// Values shared with shaders/csg.frag (uMode).
+enum class RenderMode : int
+{
+    RayCast = 0,
+    RayTrace = 1,
+    Smc = 2,
+    Wireframe = 3,
+    HitBuffer = 4, // (t, surface id) of the first hit, for checking the GPU against the CPU
+};
+
+struct RaySettings
+{
+    RenderMode mode = RenderMode::RayCast;
+    int bounces = 3;
+    glm::vec3 lightDir = glm::normalize(glm::vec3(0.5f, 1.0f, 0.3f));
+    bool ground = true;
+    float groundY = -1.01f;
+    float smcAlpha = 0.3f;
+};
+
+// GPU ray casting / ray tracing of a CSG program. The program is uploaded to
+// a float texture and evaluated per pixel with the same span algebra as
+// csg::classifyRay.
+class RayRenderer
+{
+public:
+    static constexpr int kMaxPrims = 64;
+    static constexpr int kMaxOps = 256;
+    static constexpr int kMaxStack = 8; // STACK in csg.frag
+
+    ~RayRenderer() { release(); }
+
+    bool init();
+    // Frees GL objects; must run while the GL context is alive.
+    void release();
+    bool reload();
+    const std::string& error() const { return m_shader.error(); }
+
+    // Returns false (and draws nothing) when the program exceeds the GPU limits.
+    bool upload(const csg::Program& program, const std::unordered_set<int>& highlightedNodes);
+    void draw(const Camera& camera, int width, int height, const RaySettings& settings);
+
+private:
+    Shader m_shader;
+    GLuint m_vao = 0;
+    GLuint m_data = 0;
+    int m_primCount = 0;
+    int m_opCount = 0;
+    std::vector<float> m_buffer;
+};
+
+} // namespace render
