@@ -175,11 +175,15 @@ static void testScene()
 
 void runPrimitiveTests();
 void runBooleanTests();
+void runMeshTests();
+void runIoTests();
 
 int main()
 {
     runPrimitiveTests();
     runBooleanTests();
+    runMeshTests();
+    runIoTests();
     testSpans();
     testIntersections();
     testPointClassification();

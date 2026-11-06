@@ -78,6 +78,22 @@ public:
                      m_keys.end());
     }
 
+    // Replaces all keys (sorted by time; keys at the same time keep the last). Ignores an empty list.
+    void setKeys(std::vector<Key> keys)
+    {
+        if (keys.empty())
+            return;
+        std::stable_sort(keys.begin(), keys.end(), [](const Key& a, const Key& b) { return a.time < b.time; });
+        m_keys.clear();
+        for (const Key& k : keys)
+        {
+            if (!m_keys.empty() && std::fabs(m_keys.back().time - k.time) <= kTimeEps)
+                m_keys.back() = k;
+            else
+                m_keys.push_back(k);
+        }
+    }
+
     // Collapses the track to the value at time t.
     void clearKeys(float t) { m_keys = { { 0.0f, value(t) } }; }
 

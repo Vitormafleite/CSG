@@ -5,11 +5,13 @@
 
 #include <GLFW/glfw3.h>
 
+#include "csg/Mesh.h"
 #include "csg/Scene.h"
 #include "csg/Smc.h"
 #include "render/RayRenderer.h"
 
 #include "../Check.h"
+#include "../MeshFixtures.h"
 
 #include <random>
 #include <string>
@@ -251,6 +253,43 @@ int main()
         auto op = [&] { return Op{ ops[g_rng() % 3], -1 }; };
         p.ops = { { OpCode::Push, 0 }, { OpCode::Push, 1 }, op(), { OpCode::Push, 2 }, { OpCode::Push, 3 }, op(), op(), { OpCode::Push, 4 }, op() };
         check("random 5-primitive tree #" + std::to_string(i), p, renderer, target);
+    }
+
+    std::printf("-- meshes\n");
+    GLint maxTexels = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE, &maxTexels);
+    std::printf("GL_MAX_TEXTURE_BUFFER_SIZE %d\n", maxTexels);
+    std::string error;
+    auto meshPrim = [&](const std::string& path, float scale, glm::vec3 pos, glm::quat rot) {
+        Primitive p;
+        p.type = PrimType::Mesh;
+        p.mesh = Mesh::load(path, error);
+        p.size = glm::vec3(scale, 0, 0);
+        p.position = pos;
+        p.rotation = rot;
+        return p;
+    };
+    auto singleProg = [](const Primitive& a) {
+        Program p;
+        p.prims = { a };
+        p.ops = { { OpCode::Push, 0 } };
+        return p;
+    };
+    std::string torus = fixtures::torus(), cube = fixtures::cube();
+    check("torus mesh", singleProg(meshPrim(torus, 2.5f, randomVec(-0.3f, 0.3f), randomRotation())), renderer, target);
+    check("cube mesh (edges/vertices)", singleProg(meshPrim(cube, 1.5f, glm::vec3(0.0f), glm::quat(1, 0, 0, 0))), renderer, target);
+    for (PrimType t : types)
+        for (int k = 0; k < 3; ++k)
+            check(std::string("torus ") + opNames[k] + " " + primTypeName(t),
+                  binary(meshPrim(torus, 2.5f, randomVec(-0.3f, 0.3f), randomRotation()), randomPrim(t), ops[k]), renderer, target);
+    if (std::FILE* f = std::fopen(fixtures::kDragon, "rb"))
+    {
+        std::fclose(f);
+        Primitive dragon = meshPrim(fixtures::kDragon, 2.0f, glm::vec3(0.0f), glm::quat(1, 0, 0, 0));
+        check("dragon", singleProg(dragon), renderer, target);
+        check("dragon - sphere", binary(dragon, prim(PrimType::Sphere, glm::vec3(0.5f), { 0.3f, 0.2f, 0.0f }), OpCode::Difference), renderer, target);
+        check("dragon n block", binary(dragon, prim(PrimType::Block, glm::vec3(1.2f)), OpCode::Intersection), renderer, target);
+        check("dragon u torus", binary(dragon, meshPrim(torus, 2.0f, { 0, -0.6f, 0 }, glm::quat(1, 0, 0, 0)), OpCode::Union), renderer, target);
     }
 
     renderer.release();

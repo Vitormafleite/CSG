@@ -2,6 +2,9 @@
 
 #include "render/Gl.h"
 
+#include "csg/Mesh.h"
+#include "csg/SceneIO.h"
+
 #include <GLFW/glfw3.h>
 #include <imgui.h>
 
@@ -10,7 +13,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <set>
+#include <vector>
 
 namespace {
 
@@ -48,7 +53,113 @@ const char* opSymbol(csg::NodeType type)
     }
 }
 
+// Files with the extension in the usual folders, for the file popups.
+std::vector<std::string> findFiles(const char* ext)
+{
+    std::vector<std::string> out;
+    for (const char* dir : { ".", "scenes", "model", "models" })
+    {
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::directory_iterator(dir, ec))
+            if (entry.is_regular_file() && entry.path().extension() == ext)
+                out.push_back(entry.path().lexically_normal().generic_string());
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+// Modal with a path field and the matching files. Returns true on confirm.
+bool filePopup(const char* title, const char* ext, char* path, size_t size, const char* action)
+{
+    bool confirmed = false;
+    ImGui::SetNextWindowSize(ImVec2(32.0f * ImGui::GetFontSize(), 0.0f));
+    if (!ImGui::BeginPopupModal(title, nullptr, ImGuiWindowFlags_NoSavedSettings))
+        return false;
+    ImGui::TextDisabled("Path (relative to the working directory):");
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::IsWindowAppearing())
+        ImGui::SetKeyboardFocusHere();
+    confirmed |= ImGui::InputText("##path", path, size, ImGuiInputTextFlags_EnterReturnsTrue);
+
+    std::vector<std::string> files = findFiles(ext);
+    ImGui::BeginChild("files", ImVec2(0, 8.0f * ImGui::GetFontSize()), ImGuiChildFlags_Borders);
+    for (const std::string& f : files)
+    {
+        if (ImGui::Selectable(f.c_str(), f == path, ImGuiSelectableFlags_AllowDoubleClick))
+        {
+            std::snprintf(path, size, "%s", f.c_str());
+            if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+                confirmed = true;
+        }
+    }
+    if (files.empty())
+        ImGui::TextDisabled("No %s files in ., scenes/, model/", ext);
+    ImGui::EndChild();
+
+    confirmed |= ImGui::Button(action, ImVec2(8.0f * ImGui::GetFontSize(), 0));
+    ImGui::SameLine();
+    bool cancel = ImGui::Button("Cancel", ImVec2(8.0f * ImGui::GetFontSize(), 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape);
+    if (confirmed || cancel)
+        ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+    return confirmed;
+}
+
 } // namespace
+
+void App::setStatus(const std::string& message, bool isError)
+{
+    m_status = message;
+    m_statusError = isError;
+    m_statusTime = ImGui::GetTime();
+    std::fprintf(isError ? stderr : stdout, "%s\n", message.c_str());
+}
+
+bool App::openScene(const std::string& path)
+{
+    std::string error;
+    if (!csg::loadScene(m_scene, path, error))
+    {
+        setStatus("Open failed: " + error, true);
+        return false;
+    }
+    m_selection.clear();
+    std::snprintf(m_scenePath, sizeof(m_scenePath), "%s", path.c_str());
+    frameSelection();
+    setStatus("Opened " + path);
+    return true;
+}
+
+void App::saveSceneTo(const std::string& path)
+{
+    std::error_code ec;
+    std::filesystem::path dir = std::filesystem::path(path).parent_path();
+    if (!dir.empty())
+        std::filesystem::create_directories(dir, ec);
+    std::string error;
+    if (csg::saveScene(m_scene, path, error))
+        setStatus("Saved " + path);
+    else
+        setStatus("Save failed: " + error, true);
+}
+
+void App::importMesh(const std::string& path)
+{
+    std::string error;
+    csg::Node* node = m_scene.addMesh(path, error);
+    if (!node)
+    {
+        setStatus("Import failed: " + error, true);
+        return;
+    }
+    node->position = csg::Track<glm::vec3>(m_camera.target);
+    select(node->id, false);
+    const csg::Mesh& mesh = *node->mesh;
+    char buf[256];
+    std::snprintf(buf, sizeof(buf), "Imported %s: %zu triangles, %s", path.c_str(), mesh.triangleCount(),
+                  mesh.closed() ? "closed surface" : "NOT closed (solid may be wrong)");
+    setStatus(buf, !mesh.closed());
+}
 
 void App::drawUi()
 {
@@ -60,12 +171,28 @@ void App::drawUi()
             m_playing = !m_playing;
         if (ImGui::IsKeyPressed(ImGuiKey_F, false))
             frameSelection();
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false))
+            m_openPopup = "Save scene";
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O, false))
+            m_openPopup = "Open scene";
         if (ImGui::IsKeyPressed(ImGuiKey_Delete, false))
             if (csg::Node* node = primary(); node && m_scene.isRoot(node->id))
                 m_scene.removeRoot(node->id);
     }
 
     drawMenuBar();
+
+    // File dialogs (opened from the menu and the Primitives section).
+    for (const char* name : { "Save scene", "Open scene", "Import STL mesh" })
+        if (m_openPopup == name)
+            ImGui::OpenPopup(name);
+    m_openPopup.clear();
+    if (filePopup("Save scene", ".txt", m_scenePath, sizeof(m_scenePath), "Save"))
+        saveSceneTo(m_scenePath);
+    if (filePopup("Open scene", ".txt", m_scenePath, sizeof(m_scenePath), "Open"))
+        openScene(m_scenePath);
+    if (filePopup("Import STL mesh", ".stl", m_meshPath, sizeof(m_meshPath), "Import"))
+        importMesh(m_meshPath);
     drawTreePanel();
     drawViewport();
     drawPropertiesPanel();
@@ -93,8 +220,13 @@ void App::drawMenuBar()
             m_selection.clear();
         }
         ImGui::Separator();
-        ImGui::MenuItem("Save tree (.txt)", nullptr, false, false);
-        ImGui::MenuItem("Open tree (.txt)", nullptr, false, false);
+        if (ImGui::MenuItem("Open scene (.txt)...", "Ctrl+O"))
+            m_openPopup = "Open scene";
+        if (ImGui::MenuItem("Save scene (.txt)...", "Ctrl+S"))
+            m_openPopup = "Save scene";
+        ImGui::Separator();
+        if (ImGui::MenuItem("Import STL mesh..."))
+            m_openPopup = "Import STL mesh";
         ImGui::Separator();
         if (ImGui::MenuItem("Quit"))
             glfwSetWindowShouldClose(m_window, 1);
@@ -143,6 +275,10 @@ void App::drawTreePanel()
             select(node->id, false);
         }
     }
+    if (ImGui::Button("Mesh (STL)..."))
+        m_openPopup = "Import STL mesh";
+    ImGui::SameLine();
+    ImGui::TextDisabled("closed triangle mesh as a solid");
 
     // Set operators combine two whole trees.
     sectionTitle("Set operations");
@@ -330,6 +466,16 @@ void App::drawPropertiesPanel()
     else
     {
         ImGui::Text("Type: %s", csg::primTypeName(node->prim));
+        if (node->prim == csg::PrimType::Mesh && node->mesh)
+        {
+            const csg::Mesh& mesh = *node->mesh;
+            ImGui::TextDisabled("File: %s", node->meshPath.c_str());
+            ImGui::TextDisabled("%zu triangles, BVH %zu nodes", mesh.triangleCount(), mesh.nodes().size());
+            if (mesh.closed())
+                ImGui::TextColored(kInColor, "Closed, consistently oriented surface");
+            else
+                ImGui::TextColored(kOutColor, "Open: %d edges, flipped: %d", mesh.openEdges(), mesh.flippedEdges());
+        }
 
         glm::vec3 pos = node->position.value(t);
         if (ImGui::DragFloat3("Position", &pos.x, 0.01f))
@@ -348,6 +494,9 @@ void App::drawPropertiesPanel()
             break;
         case csg::PrimType::Sphere:
             sizeChanged = ImGui::DragFloat("Radius", &size.x, 0.01f, 0.01f, 100.0f);
+            break;
+        case csg::PrimType::Mesh:
+            sizeChanged = ImGui::DragFloat("Size (largest extent)", &size.x, 0.01f, 0.01f, 100.0f);
             break;
         default:
             sizeChanged = ImGui::DragFloat("Radius", &size.x, 0.01f, 0.01f, 100.0f);
@@ -613,7 +762,9 @@ void App::drawViewport()
     if (!m_ray.error().empty())
         overlay(IM_COL32(255, 90, 90, 255), m_ray.error().c_str());
     if (m_gpuLimitHit)
-        overlay(IM_COL32(255, 90, 90, 255), "Scene exceeds GPU limits (64 primitives, 256 ops, depth 8)");
+        overlay(IM_COL32(255, 90, 90, 255), m_ray.limitError().c_str());
+    if (!m_status.empty() && ImGui::GetTime() - m_statusTime < 6.0)
+        overlay(m_statusError ? IM_COL32(255, 90, 90, 255) : IM_COL32(140, 230, 140, 255), m_status.c_str());
     if (m_settings.mode == render::RenderMode::Smc)
         overlay(IM_COL32(220, 220, 220, 255),
                 primaryRoot() ? "SMC of every primitive surface against the selected tree"

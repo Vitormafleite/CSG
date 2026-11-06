@@ -111,9 +111,10 @@ SpanList classifyRay(const Program& program, const glm::vec3& o, const glm::vec3
         case OpCode::Push:
         {
             SpanList list;
-            float t0, t1;
-            if (program.prims[op.prim].intersect(o, d, t0, t1))
-                list.push_back({ t0, t1, op.prim + 1, op.prim + 1 });
+            std::vector<glm::vec2> spans;
+            program.prims[op.prim].spans(o, d, spans);
+            for (const glm::vec2& s : spans)
+                list.push_back({ s.x, s.y, op.prim + 1, op.prim + 1 });
             stack.push_back(std::move(list));
             break;
         }

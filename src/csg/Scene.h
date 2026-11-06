@@ -21,6 +21,10 @@ public:
 
     // Tree generators
     Node* addPrimitive(PrimType type);
+    // Adds a mesh primitive from an STL file. Returns null (and sets error) on failure.
+    Node* addMesh(const std::string& path, std::string& error);
+    // Replaces the scene with loaded trees: assigns fresh ids and name counters.
+    void adopt(std::vector<std::unique_ptr<Node>> trees);
     // Combines two root trees into a new root (A op B). Returns null if invalid.
     Node* combine(int idA, int idB, NodeType op);
     // Splits an operation root back into its two subtrees.
@@ -54,9 +58,10 @@ public:
 
 private:
     int m_nextId = 1;
-    int m_counters[4] = {};
+    int m_counters[5] = {};
 
     std::unique_ptr<Node> takeRoot(int id);
+    void assignIds(Node* node);
     static void flatten(const Node* node, float t, Program& out);
 };
 

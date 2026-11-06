@@ -1,5 +1,7 @@
 #include "csg/Primitive.h"
 
+#include "csg/Mesh.h"
+
 #include <glm/gtc/constants.hpp>
 
 #include <algorithm>
@@ -38,6 +40,7 @@ const char* primTypeName(PrimType type)
     case PrimType::Sphere: return "Sphere";
     case PrimType::Cylinder: return "Cylinder";
     case PrimType::Cone: return "Cone";
+    case PrimType::Mesh: return "Mesh";
     }
     return "?";
 }
@@ -66,8 +69,33 @@ glm::vec3 Primitive::dirToLocal(const glm::vec3& d) const
     return glm::conjugate(rotation) * d;
 }
 
+void Primitive::spans(const glm::vec3& o, const glm::vec3& d, std::vector<glm::vec2>& out) const
+{
+    out.clear();
+    if (type == PrimType::Mesh)
+    {
+        if (mesh)
+            mesh->spans(toMesh(o), dirToLocal(d) / size.x, out);
+        return;
+    }
+    float t0, t1;
+    if (intersect(o, d, t0, t1))
+        out.emplace_back(t0, t1);
+}
+
 bool Primitive::intersect(const glm::vec3& worldO, const glm::vec3& worldD, float& t0, float& t1) const
 {
+    if (type == PrimType::Mesh)
+    {
+        std::vector<glm::vec2> list;
+        spans(worldO, worldD, list);
+        if (list.empty())
+            return false;
+        t0 = list.front().x;
+        t1 = list.back().y;
+        return true;
+    }
+
     glm::vec3 o = toLocal(worldO);
     glm::vec3 d = dirToLocal(worldD);
     t0 = -kInf;
@@ -193,6 +221,8 @@ bool Primitive::intersect(const glm::vec3& worldO, const glm::vec3& worldD, floa
         }
         return false;
     }
+    case PrimType::Mesh:
+        break; // handled above
     }
     return false;
 }
@@ -227,6 +257,8 @@ float Primitive::sdf(const glm::vec3& worldP) const
         float s = (cb.x < 0.0f && ca.y < 0.0f) ? -1.0f : 1.0f;
         return s * std::sqrt(std::min(dot2(ca), dot2(cb)));
     }
+    case PrimType::Mesh:
+        return mesh ? mesh->sdf(p / size.x) * size.x : kInf;
     }
     return kInf;
 }
@@ -276,6 +308,10 @@ glm::vec3 Primitive::normal(const glm::vec3& worldP) const
             n = glm::normalize(glm::vec3(p.x / rho, k, p.z / rho));
         break;
     }
+    case PrimType::Mesh:
+        if (mesh)
+            n = mesh->normalAt(p / size.x);
+        break;
     }
     return rotation * n;
 }
@@ -288,6 +324,7 @@ float Primitive::volume() const
     case PrimType::Sphere: return 4.0f / 3.0f * kPi * size.x * size.x * size.x;
     case PrimType::Cylinder: return kPi * size.x * size.x * size.y;
     case PrimType::Cone: return kPi * size.x * size.x * size.y / 3.0f;
+    case PrimType::Mesh: return mesh ? float(mesh->volume()) * size.x * size.x * size.x : 0.0f;
     }
     return 0.0f;
 }
@@ -301,6 +338,7 @@ float Primitive::area() const
     case PrimType::Sphere: return 4.0f * kPi * r * r;
     case PrimType::Cylinder: return 2.0f * kPi * r * h + 2.0f * kPi * r * r;
     case PrimType::Cone: return kPi * r * (r + std::sqrt(r * r + h * h));
+    case PrimType::Mesh: return mesh ? float(mesh->area()) * r * r : 0.0f;
     }
     return 0.0f;
 }
@@ -366,6 +404,10 @@ glm::vec3 Primitive::surfacePoint(float r0, float r1, float r2) const
         }
         break;
     }
+    case PrimType::Mesh:
+        if (mesh)
+            p = r * mesh->surfacePoint(r0, r1, r2);
+        break;
     }
     return position + rotation * p;
 }
@@ -377,6 +419,7 @@ Aabb Primitive::bounds() const
     {
     case PrimType::Block: e = size * 0.5f; break;
     case PrimType::Sphere: e = glm::vec3(size.x); break;
+    case PrimType::Mesh: e = mesh ? mesh->halfExtent() * size.x : glm::vec3(0.0f); break;
     default: e = glm::vec3(size.x, size.y * 0.5f, size.x); break;
     }
     glm::mat3 m = glm::mat3_cast(rotation);
@@ -461,6 +504,14 @@ std::vector<Curve> Primitive::edges() const
             float a = kPi * 0.5f * g;
             line(glm::vec3(r * std::cos(a), -hh, r * std::sin(a)), glm::vec3(0.0f, hh, 0.0f));
         }
+        break;
+    case PrimType::Mesh:
+        if (mesh)
+            for (const Curve& c : mesh->contours())
+            {
+                line(c.a * r, c.b * r);
+                out.back().samples = c.samples;
+            }
         break;
     }
     return out;

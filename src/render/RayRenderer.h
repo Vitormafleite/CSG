@@ -4,6 +4,8 @@
 #include "render/Camera.h"
 #include "render/Shader.h"
 
+#include <memory>
+#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -49,6 +51,8 @@ public:
 
     // Returns false (and draws nothing) when the program exceeds the GPU limits.
     bool upload(const csg::Program& program, const std::unordered_set<int>& highlightedNodes);
+    // Why the last upload failed.
+    const std::string& limitError() const { return m_limitError; }
     void draw(const Camera& camera, int width, int height, const RaySettings& settings);
 
 private:
@@ -58,6 +62,19 @@ private:
     int m_primCount = 0;
     int m_opCount = 0;
     std::vector<float> m_buffer;
+    std::string m_limitError;
+
+    // Meshes resident in the texture buffers (kept until a new one is needed).
+    struct MeshSlot
+    {
+        std::shared_ptr<const csg::Mesh> mesh;
+        int nodeBase, triBase;
+    };
+    std::vector<MeshSlot> m_meshes;
+    GLuint m_nodeBuf = 0, m_nodeTex = 0, m_triBuf = 0, m_triTex = 0;
+
+    bool uploadMeshes(const csg::Program& program);
+    const MeshSlot* slot(const csg::Mesh* mesh) const;
 };
 
 } // namespace render

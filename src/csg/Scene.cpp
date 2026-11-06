@@ -1,8 +1,11 @@
 #include "csg/Scene.h"
 
+#include "csg/Mesh.h"
+
 #include <glm/gtc/constants.hpp>
 
 #include <algorithm>
+#include <filesystem>
 #include <string>
 
 namespace csg {
@@ -59,6 +62,7 @@ Primitive Node::evaluate(float t) const
     p.color = color;
     p.reflectivity = reflectivity;
     p.nodeId = id;
+    p.mesh = mesh;
     return p;
 }
 
@@ -78,12 +82,45 @@ Node* Scene::addPrimitive(PrimType type)
     case PrimType::Sphere: node->size = Track<glm::vec3>(glm::vec3(0.6f, 0.0f, 0.0f)); break;
     case PrimType::Cylinder: node->size = Track<glm::vec3>(glm::vec3(0.4f, 1.2f, 0.0f)); break;
     case PrimType::Cone: node->size = Track<glm::vec3>(glm::vec3(0.5f, 1.2f, 0.0f)); break;
+    case PrimType::Mesh: node->size = Track<glm::vec3>(glm::vec3(2.0f, 0.0f, 0.0f)); break;
     }
 
     node->visibleFrom = 0.0f;
     node->visibleTo = duration;
     roots.push_back(std::move(node));
     return roots.back().get();
+}
+
+Node* Scene::addMesh(const std::string& path, std::string& error)
+{
+    std::shared_ptr<const Mesh> mesh = Mesh::load(path, error);
+    if (!mesh)
+        return nullptr;
+    Node* node = addPrimitive(PrimType::Mesh);
+    node->meshPath = path;
+    node->mesh = std::move(mesh);
+    node->name = std::filesystem::path(path).stem().string() + " " + std::to_string(m_counters[int(PrimType::Mesh)]);
+    node->color = glm::vec3(0.80f, 0.62f, 0.30f);
+    return node;
+}
+
+void Scene::assignIds(Node* node)
+{
+    if (!node)
+        return;
+    node->id = m_nextId++;
+    if (node->isPrimitive())
+        ++m_counters[int(node->prim)];
+    assignIds(node->a.get());
+    assignIds(node->b.get());
+}
+
+void Scene::adopt(std::vector<std::unique_ptr<Node>> trees)
+{
+    clear();
+    roots = std::move(trees);
+    for (auto& root : roots)
+        assignIds(root.get());
 }
 
 std::unique_ptr<Node> Scene::takeRoot(int id)

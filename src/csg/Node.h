@@ -33,6 +33,8 @@ struct Node
     bool limitedLife = false; // exists only during [visibleFrom, visibleTo]
     float visibleFrom = 0.0f;
     float visibleTo = 1.0f;
+    std::string meshPath;                 // Mesh: the STL file
+    std::shared_ptr<const Mesh> mesh;     // Mesh: loaded geometry (shared by nodes with the same file)
 
     // Operation children (A op B)
     std::unique_ptr<Node> a, b;

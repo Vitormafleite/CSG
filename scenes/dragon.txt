@@ -1,0 +1,35 @@
+# Theme: dragon with pearl (3D-scanned STL, used as a solid mesh primitive).
+# Over time the dragon rises from the pedestal: Dragon n Reveal, where the
+# Reveal block grows from the base to the top between t = 0 and t = 4.
+CSG 1
+duration 5
+tree
+  union "Statue"
+    intersection "Rising dragon"
+      primitive mesh "Dragon"
+        file "../model/dragon_with_pearl.stl"
+        color 0.85 0.65 0.3
+        reflectivity 0.15
+        position 0  0 0.2 0
+        rotation 0  1 0 0 0
+        size 0  2 0 0
+      end
+      primitive block "Reveal"
+        color 0.35 0.65 0.9
+        reflectivity 0
+        position 0  0 -0.8 0
+        position 4  0 0.2 0
+        rotation 0  1 0 0 0
+        size 0  2.5 0.1 2.5
+        size 4  2.5 2.1 2.5
+      end
+    end
+    primitive cylinder "Pedestal"
+      color 0.55 0.55 0.6
+      reflectivity 0.3
+      position 0  0 -0.9 0
+      rotation 0  1 0 0 0
+      size 0  0.95 0.2 0
+    end
+  end
+end

@@ -15,7 +15,8 @@ struct GLFWwindow;
 class App
 {
 public:
-    bool init();
+    // Opens the scene file if one is given.
+    bool init(const char* scenePath = nullptr);
     void run();
     void shutdown();
 
@@ -76,6 +77,18 @@ private:
     } m_probe;
 
     bool m_showImGuiDemo = false;
+
+    // Files
+    char m_scenePath[512] = "scenes/scene.txt";
+    char m_meshPath[512] = "model/dragon_with_pearl.stl";
+    std::string m_openPopup; // popup to open on the next frame
+    std::string m_status;
+    bool m_statusError = false;
+    double m_statusTime = 0.0;
+    void setStatus(const std::string& message, bool isError = false);
+    bool openScene(const std::string& path);
+    void saveSceneTo(const std::string& path);
+    void importMesh(const std::string& path);
 
     // Selection
     csg::Node* primary() const;

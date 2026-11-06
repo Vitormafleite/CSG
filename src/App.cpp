@@ -37,7 +37,7 @@ glm::vec3 membershipColor(csg::Membership m)
 
 } // namespace
 
-bool App::init()
+bool App::init(const char* scenePath)
 {
     glfwSetErrorCallback(errorCallback);
     if (!glfwInit())
@@ -80,6 +80,8 @@ bool App::init()
         std::fprintf(stderr, "line shader failed\n");
 
     m_scene.loadDemo();
+    if (scenePath)
+        openScene(scenePath);
     return true;
 }
 
@@ -326,7 +328,7 @@ void App::buildWireframe()
         for (unsigned w = 0; w < threads; ++w)
             pool.emplace_back([&, w] {
                 for (size_t i = w; i < jobs.size(); i += threads)
-                    results[i] = csg::classifyCurve(*jobs[i].program, jobs[i].curve, jobs[i].eps);
+                    results[i] = csg::classifyCurve(*jobs[i].program, jobs[i].curve, jobs[i].eps, jobs[i].curve.samples);
             });
         for (auto& t : pool)
             t.join();
