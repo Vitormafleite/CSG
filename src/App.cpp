@@ -228,13 +228,50 @@ void App::frameSelection()
 
 // ---------------------------------------------------------------- rendering
 
+// Everything the viewport image depends on, as raw bytes.
+std::string App::frameKey(const csg::Program& program, const std::unordered_set<int>& highlight) const
+{
+    std::string key;
+    auto put = [&](const auto& value) { key.append(reinterpret_cast<const char*>(&value), sizeof(value)); };
+    put(m_camera.target);
+    put(m_camera.yaw);
+    put(m_camera.pitch);
+    put(m_camera.distance);
+    put(m_camera.fovY);
+    put(m_viewportWidth);
+    put(m_viewportHeight);
+    put(m_settings.mode);
+    put(m_settings.bounces);
+    put(m_settings.lightDir);
+    put(m_settings.ground);
+    put(m_settings.groundY);
+    put(m_settings.smcAlpha);
+    put(m_wireOverlay);
+    put(m_probe.enabled);
+    put(m_probe.a);
+    put(m_probe.b);
+    for (const csg::Primitive& p : program.prims)
+    {
+        put(p.type);
+        put(p.position);
+        put(p.rotation);
+        put(p.size);
+        put(p.color);
+        put(p.reflectivity);
+        put(p.nodeId);
+        put(p.mesh.get());
+        put(bool(highlight.count(p.nodeId)));
+    }
+    for (const csg::Op& op : program.ops)
+    {
+        put(op.code);
+        put(op.prim);
+    }
+    return key;
+}
+
 void App::renderViewport()
 {
-    m_viewport.resize(m_viewportWidth, m_viewportHeight);
-    m_viewport.bind();
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
-
     // SMC view classifies against the selected tree only.
     csg::Program program;
     const csg::Node* smcTree = primaryRoot();
@@ -242,9 +279,36 @@ void App::renderViewport()
         program = m_scene.program(smcTree, m_scene.time);
     else
         program = m_scene.displayProgram(m_scene.time);
+    std::unordered_set<int> highlight = highlightedNodes();
 
-    m_gpuLimitHit = !m_ray.upload(program, highlightedNodes());
-    m_ray.draw(m_camera, m_viewportWidth, m_viewportHeight, m_settings);
+    // Skip the frame when nothing changed; render at reduced resolution while
+    // things keep changing, then once at full resolution when they settle.
+    double now = glfwGetTime();
+    std::string key = frameKey(program, highlight);
+    if (key != m_frameKey)
+    {
+        m_frameKey = key;
+        m_lastChange = now;
+    }
+    bool moving = m_resolution.adaptive && now - m_lastChange < 0.3;
+    float scale = m_resolution.still * (moving ? m_resolution.moving : 1.0f);
+    int width = std::max(1, int(m_viewportWidth * scale));
+    int height = std::max(1, int(m_viewportHeight * scale));
+    if (!m_forceRender && key == m_renderedKey && width == m_renderedWidth && height == m_renderedHeight)
+        return;
+    m_forceRender = false;
+    m_renderedKey = key;
+    m_renderedWidth = width;
+    m_renderedHeight = height;
+    auto start = std::chrono::steady_clock::now();
+
+    m_viewport.resize(width, height);
+    m_viewport.bind();
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    m_gpuLimitHit = !m_ray.upload(program, highlight);
+    m_ray.draw(m_camera, width, height, m_settings);
 
     m_wire.clear();
     if (m_settings.mode == render::RenderMode::Wireframe || m_wireOverlay)
@@ -285,6 +349,9 @@ void App::renderViewport()
     float aspect = float(m_viewportWidth) / float(m_viewportHeight);
     m_wire.draw(m_camera.projection(aspect) * m_camera.view());
     render::Framebuffer::unbind();
+
+    glFinish(); // so the timing below measures the GPU work
+    m_renderMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
 
 // Edge SMC: every primitive edge of each tree classified against that tree.

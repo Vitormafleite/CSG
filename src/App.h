@@ -45,6 +45,21 @@ private:
     bool m_gpuLimitHit = false;
     int m_viewportWidth = 1, m_viewportHeight = 1;
 
+    // The viewport image is re-rendered only when something it depends on
+    // changes, and at reduced resolution while the view keeps changing.
+    struct Resolution
+    {
+        float still = 1.0f;  // fraction of the viewport's pixels when the view is still
+        float moving = 0.5f; // ... while the camera, scene or time keeps changing
+        bool adaptive = true;
+    } m_resolution;
+    std::string m_frameKey, m_renderedKey;
+    double m_lastChange = -1.0;
+    int m_renderedWidth = 0, m_renderedHeight = 0;
+    bool m_forceRender = true;
+    double m_renderMs = 0.0;
+    std::string frameKey(const csg::Program& program, const std::unordered_set<int>& highlight) const;
+
     // Timeline
     bool m_playing = false;
     bool m_loop = true;

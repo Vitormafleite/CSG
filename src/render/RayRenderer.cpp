@@ -184,9 +184,21 @@ bool RayRenderer::upload(const csg::Program& program, const std::unordered_set<i
         m_primCount = m_opCount = 0;
         return false;
     }
-    m_useMesh = false;
+    int meshPrims = 0;
     for (const csg::Primitive& p : program.prims)
-        m_useMesh |= p.type == csg::PrimType::Mesh;
+        meshPrims += p.type == csg::PrimType::Mesh;
+    m_useMesh = meshPrims > 0;
+    if (meshPrims > kMaxMeshPrims)
+    {
+        m_limitError = "Scene exceeds GPU limits (8 mesh primitives)";
+        m_primCount = m_opCount = 0;
+        return false;
+    }
+    // Slightly padded program bounds: rays that miss them skip the evaluation.
+    csg::Aabb box = program.bounds();
+    float pad = box.empty() ? 0.0f : 1e-4f * glm::length(box.max - box.min) + 1e-5f;
+    m_boundsMin = box.min - pad;
+    m_boundsMax = box.max + pad;
     if (!uploadMeshes(program))
     {
         m_primCount = m_opCount = 0;
@@ -259,6 +271,8 @@ void RayRenderer::draw(const Camera& camera, int width, int height, const RaySet
     shader.set("uEye", camera.eye());
     shader.set("uInvViewProj", glm::inverse(camera.projection(aspect) * camera.view()));
     shader.set("uResolution", glm::vec2(width, height));
+    shader.set("uBoundsMin", m_boundsMin);
+    shader.set("uBoundsMax", m_boundsMax);
 
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);

@@ -242,6 +242,7 @@ void App::drawMenuBar()
         {
             m_ray.reload();
             m_wire.reload();
+            m_forceRender = true;
         }
         ImGui::MenuItem("ImGui demo", nullptr, &m_showImGuiDemo);
         ImGui::EndMenu();
@@ -628,6 +629,12 @@ void App::drawAnalysisPanel()
         ImGui::DragFloat("##groundY", &m_settings.groundY, 0.01f, -50.0f, 50.0f, "y = %.2f");
         ImGui::DragFloat3("Light dir", &m_settings.lightDir.x, 0.01f, -1.0f, 1.0f);
         ImGui::SliderFloat("SMC opacity", &m_settings.smcAlpha, 0.05f, 1.0f);
+        if (ImGui::SliderFloat("Resolution", &m_resolution.still, 0.25f, 1.0f, "%.2f x"))
+            m_forceRender = true;
+        ImGui::Checkbox("Lower while moving", &m_resolution.adaptive);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::SliderFloat("##moving", &m_resolution.moving, 0.25f, 1.0f, "%.2f x");
     }
 
     ImGui::End();
@@ -781,8 +788,9 @@ void App::drawViewport()
         draw->AddText(ImVec2(lp.x + 4.0f * fs, lp.y), ImGui::GetColorU32(kOutColor), "OUT");
     }
 
-    char fps[48];
-    std::snprintf(fps, sizeof(fps), "%.0f fps  %.1f ms", io.Framerate, 1000.0f / io.Framerate);
+    char fps[96];
+    std::snprintf(fps, sizeof(fps), "%.0f fps  %.1f ms  |  last render %dx%d %.1f ms", io.Framerate, 1000.0f / io.Framerate,
+                  m_renderedWidth, m_renderedHeight, m_renderMs);
     ImVec2 fs2 = ImGui::CalcTextSize(fps);
     draw->AddText(ImVec2(pos.x + avail.x - fs2.x - pad, pos.y + pad), IM_COL32(200, 200, 200, 160), fps);
 

@@ -40,6 +40,7 @@ public:
     static constexpr int kMaxPrims = 64;
     static constexpr int kMaxOps = 256;
     static constexpr int kMaxStack = 8; // STACK in csg.frag
+    static constexpr int kMaxMeshPrims = 8; // MAXMESH in csg.frag
 
     ~RayRenderer() { release(); }
 
@@ -69,6 +70,7 @@ private:
     GLuint m_vao = 0;
     GLuint m_data = 0;
     int m_primCount = 0;
+    glm::vec3 m_boundsMin{ 0.0f }, m_boundsMax{ -1.0f };
     int m_opCount = 0;
     std::vector<float> m_buffer;
     std::string m_limitError;

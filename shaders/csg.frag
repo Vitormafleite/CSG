@@ -45,6 +45,8 @@ uniform vec3 uLightDir;
 uniform vec3 uEye;
 uniform mat4 uInvViewProj;
 uniform vec2 uResolution;
+uniform vec3 uBoundsMin; // bounds of the whole program: rays that miss it see nothing
+uniform vec3 uBoundsMax;
 
 const int STACK = 8;     // RayRenderer::kMaxStack
 #if MESH_SUPPORT
@@ -65,6 +67,11 @@ const int BLOCK = 0, SPHERE = 1, CYLINDER = 2, CONE = 3, MESH = 4;
 #if MESH_SUPPORT
 // Mesh line classification (mirrors csg::Mesh::hits / spans).
 const int MAXHITS = 48;
+const int MAXMESH = 8;   // mesh primitives per program (RayRenderer::kMaxMeshPrims)
+// Window evaluation: the tree is evaluated on [wLo, wHi) only. A mesh's
+// winding count at wLo is carried over from the previous window (wCarry, in
+// the order the meshes appear in the program).
+int wCarry[MAXMESH];
 const float MESH_BARY_EPS = 2e-4;
 const float MESH_MERGE = 1e-5;
 float mT[MAXHITS];
@@ -182,7 +189,7 @@ void meshHits(Prim p, vec3 wo, vec3 wd, float tlo, float thi)
             float v = dot(d, qv) * inv;
             if (v < -MESH_BARY_EPS || u + v > 1.0 + MESH_BARY_EPS) continue;
             float t = dot(e2.xyz, qv) * inv;
-            if (t < lo || t > hi) continue;
+            if (t < lo || t >= hi) continue; // half-open, so windows never share a crossing
 
             // insertion sort; when full, the farthest crossing is dropped
             int j = min(mN, MAXHITS - 1);
@@ -439,10 +446,22 @@ void combineTop(int op, int sp)
 }
 
 // Ray SMC against the whole tree; the IN spans end up in list 0.
+float wLo = -INF, wHi = INF;
+#ifndef WINDOW_ENDS
+#define WINDOWS 4
+#define WINDOW_ENDS 0.1, 0.3, 0.6, 1.0
+#endif
+const float WINDOW_END[WINDOWS] = float[](WINDOW_ENDS);
+
+// The result is exact on [wLo, wHi): mesh spans are cut at the window ends
+// (analytic ones need no cut, set membership is pointwise).
 void evaluate(vec3 ro, vec3 rd)
 {
     int sp = 0;
     sN[0] = 0;
+#if MESH_SUPPORT
+    int mi = 0;
+#endif
     for (int i = 0; i < uOpCount; ++i)
     {
         vec4 op = texel(i, 1);
@@ -459,10 +478,11 @@ void evaluate(vec3 ro, vec3 rd)
 #if MESH_SUPPORT
                 if (pr.type == MESH)
                 {
-                    // IN spans from the winding count of the crossings.
-                    meshHits(pr, ro, rd, -INF, INF);
-                    int winding = 0, n = 0, startTri = 0;
-                    float start = 0.0;
+                    // IN spans from the winding count of the crossings, starting
+                    // from the count carried into this window.
+                    meshHits(pr, ro, rd, wLo, wHi);
+                    int winding = mi < MAXMESH ? wCarry[mi] : 0, n = 0, startTri = -1;
+                    float start = wLo;
                     for (int h = 0; h < mN; ++h)
                     {
                         if (mIn[h])
@@ -477,6 +497,15 @@ void evaluate(vec3 ro, vec3 rd)
                             ++n;
                         }
                     }
+                    if (winding > 0 && n < MAXS) // still inside at the window end
+                    {
+                        sT0[base + n] = start; sT1[base + n] = wHi;
+                        sP0[base + n] = pi + 1 + ID_STRIDE * (startTri + 1);
+                        sP1[base + n] = pi + 1;
+                        ++n;
+                    }
+                    if (mi < MAXMESH) wCarry[mi] = winding;
+                    ++mi;
                     sN[sp] = n;
                 }
                 else
@@ -501,28 +530,57 @@ void evaluate(vec3 ro, vec3 rd)
 int primOf(int id) { return abs(id) % ID_STRIDE - 1; }
 int triOf(int id) { return abs(id) / ID_STRIDE - 1; }
 
-// After evaluate(): the first entry into the solid in front of tmin.
-bool firstEntry(float tmin, out float t, out int id)
+bool rayBox(vec3 o, vec3 d, vec3 bmin, vec3 bmax, out float t0, out float t1)
+{
+    vec3 inv = 1.0 / d; // +-inf for zero components is fine here
+    vec3 ta = (bmin - o) * inv, tb = (bmax - o) * inv;
+    vec3 lo = min(ta, tb), hi = max(ta, tb);
+    t0 = max(max(lo.x, lo.y), lo.z);
+    t1 = min(min(hi.x, hi.y), hi.z);
+    return t0 <= t1;
+}
+
+// Evaluates the tree along the ray window by window and stops at the first
+// window with an answer, so the mesh traversals stop near the first hit.
+//   shadow = false: the first entry into the solid with t > tmin (t, id)
+//   shadow = true:  whether any part of the solid lies beyond tmin
+// Without meshes a single window covers the whole line.
+bool march(vec3 ro, vec3 rd, float tmin, bool shadow, out float t, out int id)
 {
     t = INF;
     id = 0;
-    for (int k = 0; k < sN[0]; ++k)
+    float ba, bb;
+    if (!rayBox(ro, rd, uBoundsMin, uBoundsMax, ba, bb) || bb <= tmin)
+        return false;
+#if MESH_SUPPORT
+    for (int m = 0; m < MAXMESH; ++m) wCarry[m] = 0;
+    // Window ends at growing fractions of the bounds, the last one open.
+    float start = max(ba, tmin), len = bb - start;
+    for (int w = 0; w < WINDOWS; ++w)
     {
-        if (sT0[k] > tmin)
+        wLo = w == 0 ? -INF : wHi;
+        wHi = w == WINDOWS - 1 ? INF : start + len * WINDOW_END[w];
+#else
+    {
+        wLo = -INF;
+        wHi = INF;
+#endif
+        evaluate(ro, rd);
+        float lo = max(tmin, wLo);
+        for (int k = 0; k < sN[0]; ++k)
         {
-            t = sT0[k];
-            id = sP0[k];
-            return true;
+            if (shadow)
+            {
+                if (sT1[k] > lo && sT0[k] < wHi) return true;
+            }
+            else if (sT0[k] > lo && sT0[k] < wHi) // an entry at wLo is a carried span, not a surface
+            {
+                t = sT0[k];
+                id = sP0[k];
+                return true;
+            }
         }
     }
-    return false;
-}
-
-// After evaluate(): does any part of the solid lie in front of tmin?
-bool solidAhead(float tmin)
-{
-    for (int k = 0; k < sN[0]; ++k)
-        if (sT1[k] > tmin) return true;
     return false;
 }
 
@@ -556,8 +614,7 @@ vec3 rayCast(vec3 ro, vec3 rd)
 {
     float t;
     int id;
-    evaluate(ro, rd);
-    if (!firstEntry(0.0, t, id))
+    if (!march(ro, rd, 0.0, false, t, id))
         return background(rd);
     vec3 p = ro + rd * t;
     Prim pr = loadPrim(primOf(id));
@@ -597,13 +654,13 @@ vec3 rayTrace(vec3 ro, vec3 rd)
     for (int step = 0; step < 2 * uBounces + 2; ++step)
     {
         bool shadow = (step % 2) == 1;
-        evaluate(shadow ? p + n * 1e-3 : ro, shadow ? L : rd);
+        float t;
+        int id;
+        bool found = march(shadow ? p + n * 1e-3 : ro, shadow ? L : rd, 1e-3, shadow, t, id);
 
         if (!shadow)
         {
-            float t;
-            int id;
-            bool hit = firstEntry(1e-3, t, id);
+            bool hit = found;
             tg = groundHit(ro, rd);
             if (!hit && tg >= INF)
             {
@@ -629,7 +686,7 @@ vec3 rayTrace(vec3 ro, vec3 rd)
             continue;
         }
 
-        float lit = solidAhead(1e-3) ? 0.0 : 1.0;
+        float lit = found ? 0.0 : 1.0;
         float diff = max(dot(n, L), 0.0) * lit;
         float spec = pow(max(dot(n, normalize(L - rd)), 0.0), 48.0) * lit;
         vec3 local = base * (0.15 + 0.85 * diff) + vec3(0.4) * spec;
@@ -662,7 +719,12 @@ vec3 smcView(vec3 ro, vec3 rd)
     float hA[MAXH];
     int count = 0;
 
-    evaluate(ro, rd); // result spans stay in list 0
+#if MESH_SUPPORT
+    for (int m = 0; m < MAXMESH; ++m) wCarry[m] = 0;
+#endif
+    wLo = -INF;
+    wHi = INF;
+    evaluate(ro, rd); // every span is needed; they stay in list 0
 
     for (int i = 0; i < uPrimCount; ++i)
     {
@@ -744,8 +806,7 @@ void main()
     fragColor = vec4(-1.0, 0.0, 0.0, 1.0);
     if (uOpCount > 0)
     {
-        evaluate(ro, rd);
-        if (firstEntry(0.0, t, id))
+        if (march(ro, rd, 0.0, false, t, id))
             fragColor = vec4(t, float(id < 0 ? -(primOf(id) + 1) : primOf(id) + 1), 0.0, 1.0);
     }
 #else
