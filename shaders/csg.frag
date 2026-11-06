@@ -20,6 +20,12 @@
 #ifndef MESH_SUPPORT
 #define MESH_SUPPORT 0
 #endif
+// One program per render mode (uMode), so the tree evaluation is inlined
+// once per program: 0 ray casting (also draws the wireframe background),
+// 1 ray tracing, 2 SMC surfaces, 4 hit buffer.
+#ifndef RENDER_MODE
+#define RENDER_MODE 0
+#endif
 
 out vec4 fragColor;
 
@@ -30,7 +36,7 @@ uniform samplerBuffer uMeshTris;
 #endif
 uniform int uPrimCount;
 uniform int uOpCount;
-uniform int uMode;      // 0 ray casting, 1 ray tracing, 2 SMC surfaces, 3 wireframe (background only), 4 hit buffer
+uniform int uMode;      // as RENDER_MODE, plus 3 wireframe (background only)
 uniform int uBounces;
 uniform int uGround;
 uniform float uGroundY;
@@ -48,6 +54,10 @@ const int MAXS = 8;
 #endif
 const float INF = 1e30;
 const float SPAN_EPS = 1e-5;
+
+// Span ends store a surface id: sign * (prim + 1 + ID_STRIDE * (triangle + 1)),
+// negative = flipped normal, triangle = -1 for analytic primitives.
+const int ID_STRIDE = 128; // > RayRenderer::kMaxPrims
 
 const int OP_PUSH = 0, OP_UNION = 1, OP_INTER = 2, OP_DIFF = 3, OP_EMPTY = 4;
 const int BLOCK = 0, SPHERE = 1, CYLINDER = 2, CONE = 3, MESH = 4;
@@ -209,19 +219,6 @@ vec3 meshTriNormal(Prim p, int ti)
     return qrot(p.rot, n);
 }
 
-// Normal at the crossing at parameter t: re-trace a short window around it.
-vec3 meshNormal(Prim p, vec3 ro, vec3 rd, float t)
-{
-    float w = 1e-3 * (1.0 + abs(t));
-    meshHits(p, ro, rd, t - w, t + w);
-    int best = -1;
-    float bestD = INF;
-    for (int i = 0; i < mN; ++i)
-    {
-        if (abs(mT[i] - t) < bestD) { bestD = abs(mT[i] - t); best = mTri[i]; }
-    }
-    return best >= 0 ? meshTriNormal(p, best) : vec3(0.0, 1.0, 0.0);
-}
 #endif
 
 // ---------------------------------------------------------------- primitives
@@ -464,18 +461,19 @@ void evaluate(vec3 ro, vec3 rd)
                 {
                     // IN spans from the winding count of the crossings.
                     meshHits(pr, ro, rd, -INF, INF);
-                    int winding = 0, n = 0;
+                    int winding = 0, n = 0, startTri = 0;
                     float start = 0.0;
                     for (int h = 0; h < mN; ++h)
                     {
                         if (mIn[h])
                         {
-                            if (winding++ == 0) start = mT[h];
+                            if (winding++ == 0) { start = mT[h]; startTri = mTri[h]; }
                         }
                         else if (winding > 0 && --winding == 0 && n < MAXS)
                         {
                             sT0[base + n] = start; sT1[base + n] = mT[h];
-                            sP0[base + n] = pi + 1; sP1[base + n] = pi + 1;
+                            sP0[base + n] = pi + 1 + ID_STRIDE * (startTri + 1);
+                            sP1[base + n] = pi + 1 + ID_STRIDE * (mTri[h] + 1);
                             ++n;
                         }
                     }
@@ -500,15 +498,16 @@ void evaluate(vec3 ro, vec3 rd)
     }
 }
 
-// First entry into the solid in front of tmin.
-bool firstHit(vec3 ro, vec3 rd, float tmin, out float t, out int id)
+int primOf(int id) { return abs(id) % ID_STRIDE - 1; }
+int triOf(int id) { return abs(id) / ID_STRIDE - 1; }
+
+// After evaluate(): the first entry into the solid in front of tmin.
+bool firstEntry(float tmin, out float t, out int id)
 {
     t = INF;
     id = 0;
-    evaluate(ro, rd);
-    for (int k = 0; k < MAXS; ++k)
+    for (int k = 0; k < sN[0]; ++k)
     {
-        if (k >= sN[0]) break;
         if (sT0[k] > tmin)
         {
             t = sT0[k];
@@ -519,14 +518,11 @@ bool firstHit(vec3 ro, vec3 rd, float tmin, out float t, out int id)
     return false;
 }
 
-bool occluded(vec3 ro, vec3 rd)
+// After evaluate(): does any part of the solid lie in front of tmin?
+bool solidAhead(float tmin)
 {
-    evaluate(ro, rd);
-    for (int k = 0; k < MAXS; ++k)
-    {
-        if (k >= sN[0]) break;
-        if (sT1[k] > 1e-3) return true;
-    }
+    for (int k = 0; k < sN[0]; ++k)
+        if (sT1[k] > tmin) return true;
     return false;
 }
 
@@ -543,18 +539,36 @@ vec3 baseColor(Prim p)
     return p.highlight ? mix(p.color, vec3(1.0, 0.62, 0.15), 0.45) : p.color;
 }
 
-vec3 surfaceNormal(Prim p, int id, vec3 ro, vec3 rd, float t)
+vec3 surfaceNormal(Prim p, int id, vec3 pos, vec3 rd)
 {
 #if MESH_SUPPORT
-    vec3 n = normalize(p.type == MESH ? meshNormal(p, ro, rd, t) : primNormal(p, ro + rd * t));
+    vec3 n = normalize(p.type == MESH ? meshTriNormal(p, triOf(id)) : primNormal(p, pos));
 #else
-    vec3 n = normalize(primNormal(p, ro + rd * t));
+    vec3 n = normalize(primNormal(p, pos));
 #endif
     if (id < 0) n = -n; // boundary from a subtracted solid
     if (dot(n, rd) > 0.0) n = -n;
     return n;
 }
 
+#if RENDER_MODE == 0
+vec3 rayCast(vec3 ro, vec3 rd)
+{
+    float t;
+    int id;
+    evaluate(ro, rd);
+    if (!firstEntry(0.0, t, id))
+        return background(rd);
+    vec3 p = ro + rd * t;
+    Prim pr = loadPrim(primOf(id));
+    vec3 n = surfaceNormal(pr, id, p, rd);
+    float key = max(dot(n, normalize(uLightDir)), 0.0);
+    float head = max(dot(n, -rd), 0.0);
+    return baseColor(pr) * (0.12 + 0.55 * key + 0.4 * head);
+}
+#endif
+
+#if RENDER_MODE == 1
 float groundHit(vec3 ro, vec3 rd)
 {
     if (uGround == 0 || rd.y > -1e-6) return INF;
@@ -569,61 +583,57 @@ vec3 groundColor(vec3 p)
     return mix(vec3(0.42), vec3(0.55), checker);
 }
 
-vec3 rayCast(vec3 ro, vec3 rd)
-{
-    float t;
-    int id;
-    if (!firstHit(ro, rd, 0.0, t, id))
-        return background(rd);
-    vec3 p = ro + rd * t;
-    Prim pr = loadPrim(abs(id) - 1);
-    vec3 n = surfaceNormal(pr, id, ro, rd, t);
-    float key = max(dot(n, normalize(uLightDir)), 0.0);
-    float head = max(dot(n, -rd), 0.0);
-    return baseColor(pr) * (0.12 + 0.55 * key + 0.4 * head);
-}
-
+// Whitted-style: per bounce a primary ray, then a shadow ray from its hit.
+// The two alternate in one loop, so the tree is evaluated at a single call site.
 vec3 rayTrace(vec3 ro, vec3 rd)
 {
     vec3 color = vec3(0.0);
     vec3 weight = vec3(1.0);
     vec3 L = normalize(uLightDir);
 
-    for (int bounce = 0; bounce <= uBounces; ++bounce)
+    vec3 p = vec3(0.0), n = vec3(0.0, 1.0, 0.0), base = vec3(0.0);
+    float refl = 0.0, tg = INF;
+    bool onGround = false;
+    for (int step = 0; step < 2 * uBounces + 2; ++step)
     {
-        float t;
-        int id;
-        bool hit = firstHit(ro, rd, 1e-3, t, id);
-        float tg = groundHit(ro, rd);
-        if (!hit && tg >= INF)
+        bool shadow = (step % 2) == 1;
+        evaluate(shadow ? p + n * 1e-3 : ro, shadow ? L : rd);
+
+        if (!shadow)
         {
-            color += weight * background(rd);
-            break;
+            float t;
+            int id;
+            bool hit = firstEntry(1e-3, t, id);
+            tg = groundHit(ro, rd);
+            if (!hit && tg >= INF)
+            {
+                color += weight * background(rd);
+                break;
+            }
+            onGround = !(hit && t < tg);
+            if (!onGround)
+            {
+                p = ro + rd * t;
+                Prim pr = loadPrim(primOf(id));
+                n = surfaceNormal(pr, id, p, rd);
+                base = baseColor(pr);
+                refl = pr.refl;
+            }
+            else
+            {
+                p = ro + rd * tg;
+                n = vec3(0.0, 1.0, 0.0);
+                base = groundColor(p);
+                refl = 0.1;
+            }
+            continue;
         }
 
-        vec3 p, n, base;
-        float refl;
-        if (hit && t < tg)
-        {
-            p = ro + rd * t;
-            Prim pr = loadPrim(abs(id) - 1);
-            n = surfaceNormal(pr, id, ro, rd, t);
-            base = baseColor(pr);
-            refl = pr.refl;
-        }
-        else
-        {
-            p = ro + rd * tg;
-            n = vec3(0.0, 1.0, 0.0);
-            base = groundColor(p);
-            refl = 0.1;
-        }
-
-        float lit = occluded(p + n * 1e-3, L) ? 0.0 : 1.0;
+        float lit = solidAhead(1e-3) ? 0.0 : 1.0;
         float diff = max(dot(n, L), 0.0) * lit;
         float spec = pow(max(dot(n, normalize(L - rd)), 0.0), 48.0) * lit;
         vec3 local = base * (0.15 + 0.85 * diff) + vec3(0.4) * spec;
-        if (!(hit && t < tg))
+        if (onGround)
             local = mix(local, background(rd), clamp(tg / 60.0, 0.0, 1.0)); // fade the ground
 
         color += weight * (1.0 - refl) * local;
@@ -635,7 +645,9 @@ vec3 rayTrace(vec3 ro, vec3 rd)
     }
     return color;
 }
+#endif
 
+#if RENDER_MODE == 2
 // Every primitive surface along the ray, classified against the tree:
 // IN (inside the solid), ON (part of its boundary), OUT (cut away).
 vec3 smcView(vec3 ro, vec3 rd)
@@ -679,9 +691,8 @@ vec3 smcView(vec3 ro, vec3 rd)
 
             float eps = 1e-4 * (1.0 + t);
             bool on = false, inside = false;
-            for (int k = 0; k < MAXS; ++k)
+            for (int k = 0; k < sN[0]; ++k)
             {
-                if (k >= sN[0]) break;
                 if (abs(t - sT0[k]) < eps || abs(t - sT1[k]) < eps) on = true;
                 else if (t > sT0[k] && t < sT1[k]) inside = true;
             }
@@ -710,14 +721,14 @@ vec3 smcView(vec3 ro, vec3 rd)
 
     vec3 color = vec3(0.0);
     float transmit = 1.0;
-    for (int k = 0; k < MAXH; ++k)
+    for (int k = 0; k < count; ++k)
     {
-        if (k >= count) break;
         color += transmit * hA[k] * hC[k];
         transmit *= 1.0 - hA[k];
     }
     return color + transmit * background(rd);
 }
+#endif
 
 void main()
 {
@@ -726,24 +737,29 @@ void main()
     vec3 ro = uEye;
     vec3 rd = normalize(far.xyz / far.w - uEye);
 
-    if (uMode == 4)
+#if RENDER_MODE == 4
+    // Raw first hit for tests/gpu_check.cpp: (t, signed primitive id), or t = -1 on a miss.
+    float t;
+    int id;
+    fragColor = vec4(-1.0, 0.0, 0.0, 1.0);
+    if (uOpCount > 0)
     {
-        // Raw first hit for tests/gpu_check.cpp: (t, signed surface id), or t = -1 on a miss.
-        float t;
-        int id;
-        fragColor = uOpCount > 0 && firstHit(ro, rd, 0.0, t, id) ? vec4(t, float(id), 0.0, 1.0) : vec4(-1.0, 0.0, 0.0, 1.0);
-        return;
+        evaluate(ro, rd);
+        if (firstEntry(0.0, t, id))
+            fragColor = vec4(t, float(id < 0 ? -(primOf(id) + 1) : primOf(id) + 1), 0.0, 1.0);
     }
-
+#else
     vec3 color;
     if (uOpCount == 0 || uMode == 3)
         color = background(rd);
-    else if (uMode == 1)
-        color = rayTrace(ro, rd);
-    else if (uMode == 2)
-        color = smcView(ro, rd);
     else
+#if RENDER_MODE == 1
+        color = rayTrace(ro, rd);
+#elif RENDER_MODE == 2
+        color = smcView(ro, rd);
+#else
         color = rayCast(ro, rd);
-
+#endif
     fragColor = vec4(color, 1.0);
+#endif
 }

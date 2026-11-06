@@ -25,11 +25,13 @@ void RayRenderer::release()
         glDeleteBuffers(2, buffers);
     }
     m_data = m_vao = 0;
-    m_meshShader.release();
-    m_meshShaderTried = false;
+    for (auto& modes : m_variants)
+        for (Shader& s : modes)
+            s.release();
+    for (auto& modes : m_tried)
+        modes[0] = modes[1] = false;
     m_nodeBuf = m_nodeTex = m_triBuf = m_triTex = 0;
     m_meshes.clear();
-    m_shader.release();
 }
 
 bool RayRenderer::init()
@@ -59,11 +61,45 @@ bool RayRenderer::init()
     return reload();
 }
 
+namespace {
+std::string defines(int mode, bool mesh)
+{
+    return "#define RENDER_MODE " + std::to_string(mode) + "\n#define MESH_SUPPORT " + (mesh ? "1" : "0") + "\n";
+}
+} // namespace
+
+Shader* RayRenderer::variant(RenderMode mode, bool mesh)
+{
+    int m = mode == RenderMode::Wireframe ? int(RenderMode::RayCast) : int(mode); // wireframe: background only
+    Shader& s = m_variants[m][mesh];
+    if (!m_tried[m][mesh])
+    {
+        m_tried[m][mesh] = true;
+        if (mesh)
+            std::fprintf(stderr, "Compiling the mesh shader for render mode %d...\n", m);
+        if (!s.load("fullscreen.vert", "csg.frag", defines(m, mesh)))
+        {
+            m_error = s.error();
+            std::fprintf(stderr, "%s\n", m_error.c_str());
+        }
+    }
+    return s.valid() ? &s : nullptr;
+}
+
 bool RayRenderer::reload()
 {
-    bool ok = m_shader.load("fullscreen.vert", "csg.frag");
-    if (m_meshShaderTried)
-        ok &= m_meshShader.load("fullscreen.vert", "csg.frag", "#define MESH_SUPPORT 1\n");
+    // Recompile the variants already in use; on failure the old program stays.
+    m_error.clear();
+    bool ok = true;
+    for (int m = 0; m < kModes; ++m)
+        for (int mesh = 0; mesh < 2; ++mesh)
+            if (m_tried[m][mesh] && !m_variants[m][mesh].load("fullscreen.vert", "csg.frag", defines(m, mesh)))
+            {
+                m_error = m_variants[m][mesh].error();
+                ok = false;
+            }
+    if (!m_tried[0][0])
+        ok &= variant(RenderMode::RayCast, false) != nullptr;
     return ok;
 }
 
@@ -148,22 +184,9 @@ bool RayRenderer::upload(const csg::Program& program, const std::unordered_set<i
         m_primCount = m_opCount = 0;
         return false;
     }
-    m_useMeshShader = false;
+    m_useMesh = false;
     for (const csg::Primitive& p : program.prims)
-        m_useMeshShader |= p.type == csg::PrimType::Mesh;
-    if (m_useMeshShader && !m_meshShaderTried)
-    {
-        m_meshShaderTried = true;
-        std::fprintf(stderr, "Compiling the mesh shader variant...\n");
-        if (!m_meshShader.load("fullscreen.vert", "csg.frag", "#define MESH_SUPPORT 1\n"))
-            std::fprintf(stderr, "%s\n", m_meshShader.error().c_str());
-    }
-    if (m_useMeshShader && !m_meshShader.valid())
-    {
-        m_limitError = "Mesh shader failed to compile";
-        m_primCount = m_opCount = 0;
-        return false;
-    }
+        m_useMesh |= p.type == csg::PrimType::Mesh;
     if (!uploadMeshes(program))
     {
         m_primCount = m_opCount = 0;
@@ -208,9 +231,10 @@ bool RayRenderer::upload(const csg::Program& program, const std::unordered_set<i
 
 void RayRenderer::draw(const Camera& camera, int width, int height, const RaySettings& settings)
 {
-    Shader& shader = m_useMeshShader ? m_meshShader : m_shader;
-    if (!shader.valid())
+    Shader* variantShader = variant(settings.mode, m_useMesh);
+    if (!variantShader)
         return;
+    Shader& shader = *variantShader;
     float aspect = float(width) / float(height);
 
     shader.use();

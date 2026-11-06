@@ -47,7 +47,7 @@ public:
     // Frees GL objects; must run while the GL context is alive.
     void release();
     bool reload();
-    const std::string& error() const { return m_meshShader.error().empty() ? m_shader.error() : m_meshShader.error(); }
+    const std::string& error() const { return m_error; }
 
     // Returns false (and draws nothing) when the program exceeds the GPU limits.
     bool upload(const csg::Program& program, const std::unordered_set<int>& highlightedNodes);
@@ -56,12 +56,16 @@ public:
     void draw(const Camera& camera, int width, int height, const RaySettings& settings);
 
 private:
-    // csg.frag without and with mesh support. The mesh variant is heavier to
-    // compile, so it is built only once a program contains a mesh.
-    Shader m_shader;
-    Shader m_meshShader;
-    bool m_meshShaderTried = false;
-    bool m_useMeshShader = false;
+    // csg.frag variants: one per render mode (RENDER_MODE), without and with
+    // mesh support (MESH_SUPPORT). Each is compiled the first time it is used,
+    // so a program only inlines the code paths of one mode.
+    static constexpr int kModes = 5;
+    Shader m_variants[kModes][2];
+    bool m_tried[kModes][2] = {};
+    bool m_useMesh = false;
+    std::string m_error;
+
+    Shader* variant(RenderMode mode, bool mesh);
     GLuint m_vao = 0;
     GLuint m_data = 0;
     int m_primCount = 0;
