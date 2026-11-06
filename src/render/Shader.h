@@ -20,7 +20,8 @@ public:
     Shader& operator=(const Shader&) = delete;
 
     // Compiles and links; on failure keeps the previous program and returns false.
-    bool load(const std::string& vertexFile, const std::string& fragmentFile);
+    // defines (e.g. "#define X 1\n") are inserted after the #version line.
+    bool load(const std::string& vertexFile, const std::string& fragmentFile, const std::string& defines = "");
     const std::string& error() const { return m_error; }
     bool valid() const { return m_program != 0; }
     // Frees GL objects; must run while the GL context is alive.

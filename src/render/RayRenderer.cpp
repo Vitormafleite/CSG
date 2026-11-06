@@ -3,6 +3,7 @@
 #include "csg/Mesh.h"
 
 #include <algorithm>
+#include <cstdio>
 
 namespace render {
 
@@ -24,6 +25,8 @@ void RayRenderer::release()
         glDeleteBuffers(2, buffers);
     }
     m_data = m_vao = 0;
+    m_meshShader.release();
+    m_meshShaderTried = false;
     m_nodeBuf = m_nodeTex = m_triBuf = m_triTex = 0;
     m_meshes.clear();
     m_shader.release();
@@ -58,7 +61,10 @@ bool RayRenderer::init()
 
 bool RayRenderer::reload()
 {
-    return m_shader.load("fullscreen.vert", "csg.frag");
+    bool ok = m_shader.load("fullscreen.vert", "csg.frag");
+    if (m_meshShaderTried)
+        ok &= m_meshShader.load("fullscreen.vert", "csg.frag", "#define MESH_SUPPORT 1\n");
+    return ok;
 }
 
 const RayRenderer::MeshSlot* RayRenderer::slot(const csg::Mesh* mesh) const
@@ -142,6 +148,22 @@ bool RayRenderer::upload(const csg::Program& program, const std::unordered_set<i
         m_primCount = m_opCount = 0;
         return false;
     }
+    m_useMeshShader = false;
+    for (const csg::Primitive& p : program.prims)
+        m_useMeshShader |= p.type == csg::PrimType::Mesh;
+    if (m_useMeshShader && !m_meshShaderTried)
+    {
+        m_meshShaderTried = true;
+        std::fprintf(stderr, "Compiling the mesh shader variant...\n");
+        if (!m_meshShader.load("fullscreen.vert", "csg.frag", "#define MESH_SUPPORT 1\n"))
+            std::fprintf(stderr, "%s\n", m_meshShader.error().c_str());
+    }
+    if (m_useMeshShader && !m_meshShader.valid())
+    {
+        m_limitError = "Mesh shader failed to compile";
+        m_primCount = m_opCount = 0;
+        return false;
+    }
     if (!uploadMeshes(program))
     {
         m_primCount = m_opCount = 0;
@@ -186,32 +208,33 @@ bool RayRenderer::upload(const csg::Program& program, const std::unordered_set<i
 
 void RayRenderer::draw(const Camera& camera, int width, int height, const RaySettings& settings)
 {
-    if (!m_shader.valid())
+    Shader& shader = m_useMeshShader ? m_meshShader : m_shader;
+    if (!shader.valid())
         return;
     float aspect = float(width) / float(height);
 
-    m_shader.use();
+    shader.use();
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, m_data);
-    m_shader.set("uData", 0);
+    shader.set("uData", 0);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_BUFFER, m_nodeTex);
-    m_shader.set("uMeshNodes", 1);
+    shader.set("uMeshNodes", 1);
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_BUFFER, m_triTex);
-    m_shader.set("uMeshTris", 2);
+    shader.set("uMeshTris", 2);
     glActiveTexture(GL_TEXTURE0);
-    m_shader.set("uPrimCount", m_primCount);
-    m_shader.set("uOpCount", m_opCount);
-    m_shader.set("uMode", int(settings.mode));
-    m_shader.set("uBounces", settings.bounces);
-    m_shader.set("uLightDir", glm::normalize(settings.lightDir));
-    m_shader.set("uGround", settings.ground ? 1 : 0);
-    m_shader.set("uGroundY", settings.groundY);
-    m_shader.set("uSmcAlpha", settings.smcAlpha);
-    m_shader.set("uEye", camera.eye());
-    m_shader.set("uInvViewProj", glm::inverse(camera.projection(aspect) * camera.view()));
-    m_shader.set("uResolution", glm::vec2(width, height));
+    shader.set("uPrimCount", m_primCount);
+    shader.set("uOpCount", m_opCount);
+    shader.set("uMode", int(settings.mode));
+    shader.set("uBounces", settings.bounces);
+    shader.set("uLightDir", glm::normalize(settings.lightDir));
+    shader.set("uGround", settings.ground ? 1 : 0);
+    shader.set("uGroundY", settings.groundY);
+    shader.set("uSmcAlpha", settings.smcAlpha);
+    shader.set("uEye", camera.eye());
+    shader.set("uInvViewProj", glm::inverse(camera.projection(aspect) * camera.view()));
+    shader.set("uResolution", glm::vec2(width, height));
 
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);

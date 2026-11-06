@@ -71,13 +71,19 @@ void Shader::release()
     m_program = 0;
 }
 
-bool Shader::load(const std::string& vertexFile, const std::string& fragmentFile)
+bool Shader::load(const std::string& vertexFile, const std::string& fragmentFile, const std::string& defines)
 {
     std::string vs, fs;
     if (!readFile(shaderPath(vertexFile), vs) || !readFile(shaderPath(fragmentFile), fs))
     {
         m_error = "cannot read " + vertexFile + " / " + fragmentFile;
         return false;
+    }
+
+    if (!defines.empty())
+    {
+        size_t eol = fs.find('\n');
+        fs.insert(eol == std::string::npos ? fs.size() : eol + 1, defines);
     }
 
     GLuint v = compile(GL_VERTEX_SHADER, vs, vertexFile, m_error);

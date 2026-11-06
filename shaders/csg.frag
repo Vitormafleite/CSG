@@ -14,11 +14,20 @@
 //   uMeshNodes, 2 texels per BVH node: (min, leftOrFirst) (max, count)
 //   uMeshTris,  3 texels per triangle: (v0, nx) (e1, ny) (e2, nz)
 
+// Built in two variants (RayRenderer): without meshes, and with MESH_SUPPORT 1,
+// compiled only once a scene has a mesh. All loops over mesh data have
+// dynamic bounds, so drivers cannot try to unroll them.
+#ifndef MESH_SUPPORT
+#define MESH_SUPPORT 0
+#endif
+
 out vec4 fragColor;
 
 uniform sampler2D uData;
+#if MESH_SUPPORT
 uniform samplerBuffer uMeshNodes;
 uniform samplerBuffer uMeshTris;
+#endif
 uniform int uPrimCount;
 uniform int uOpCount;
 uniform int uMode;      // 0 ray casting, 1 ray tracing, 2 SMC surfaces, 3 wireframe (background only), 4 hit buffer
@@ -32,13 +41,18 @@ uniform mat4 uInvViewProj;
 uniform vec2 uResolution;
 
 const int STACK = 8;     // RayRenderer::kMaxStack
-const int MAXS = 16;     // max spans per list
+#if MESH_SUPPORT
+const int MAXS = 16;     // max spans per list (a mesh can give many)
+#else
+const int MAXS = 8;
+#endif
 const float INF = 1e30;
 const float SPAN_EPS = 1e-5;
 
 const int OP_PUSH = 0, OP_UNION = 1, OP_INTER = 2, OP_DIFF = 3, OP_EMPTY = 4;
 const int BLOCK = 0, SPHERE = 1, CYLINDER = 2, CONE = 3, MESH = 4;
 
+#if MESH_SUPPORT
 // Mesh line classification (mirrors csg::Mesh::hits / spans).
 const int MAXHITS = 48;
 const float MESH_BARY_EPS = 2e-4;
@@ -47,6 +61,7 @@ float mT[MAXHITS];
 int mTri[MAXHITS];
 bool mIn[MAXHITS];
 int mN;
+#endif
 
 const vec3 COLOR_IN = vec3(0.25, 0.85, 0.35);
 const vec3 COLOR_ON = vec3(1.0, 0.85, 0.2);
@@ -91,6 +106,7 @@ Prim loadPrim(int i)
 }
 
 // ---------------------------------------------------------------- meshes
+#if MESH_SUPPORT
 
 bool lineBox(vec3 o, vec3 invD, vec3 bmin, vec3 bmax, out float t0, out float t1)
 {
@@ -124,7 +140,7 @@ void meshHits(Prim p, vec3 wo, vec3 wd, float tlo, float thi)
     int stack[64];
     int sp = 0;
     stack[sp++] = 0;
-    for (int guard = 0; guard < 65536 && sp > 0; ++guard)
+    while (sp > 0) // terminates: each interior node is pushed once
     {
         int ni = (nodeBase + stack[--sp]) * 2;
         vec4 a = texelFetch(uMeshNodes, ni), b = texelFetch(uMeshNodes, ni + 1);
@@ -174,9 +190,8 @@ void meshHits(Prim p, vec3 wo, vec3 wd, float tlo, float thi)
     // Merge duplicates at one point, cancel grazing enter/leave pairs.
     float merge = MESH_MERGE / max(length(d), 1e-30);
     int n = 0;
-    for (int i = 0; i < MAXHITS; ++i)
+    for (int i = 0; i < mN; ++i)
     {
-        if (i >= mN) break;
         if (n > 0 && mT[i] - mT[n - 1] <= merge)
         {
             if (mIn[n - 1] != mIn[i]) --n;
@@ -201,13 +216,13 @@ vec3 meshNormal(Prim p, vec3 ro, vec3 rd, float t)
     meshHits(p, ro, rd, t - w, t + w);
     int best = -1;
     float bestD = INF;
-    for (int i = 0; i < MAXHITS; ++i)
+    for (int i = 0; i < mN; ++i)
     {
-        if (i >= mN) break;
         if (abs(mT[i] - t) < bestD) { bestD = abs(mT[i] - t); best = mTri[i]; }
     }
     return best >= 0 ? meshTriNormal(p, best) : vec3(0.0, 1.0, 0.0);
 }
+#endif
 
 // ---------------------------------------------------------------- primitives
 
@@ -372,9 +387,8 @@ void combineTop(int op, int sp)
     float curT0 = 0.0;
     int curP0 = 0;
 
-    for (int it = 0; it < 4 * MAXS; ++it)
+    while (ia < na || ib < nb) // one list end per iteration
     {
-        if (ia >= na && ib >= nb) break;
         float ta = ia < na ? endT(baseA, ia) : INF;
         float tb = ib < nb ? endT(baseB, ib) : INF;
         float t;
@@ -445,15 +459,15 @@ void evaluate(vec3 ro, vec3 rd)
             {
                 int pi = int(op.y + 0.5);
                 Prim pr = loadPrim(pi);
+#if MESH_SUPPORT
                 if (pr.type == MESH)
                 {
                     // IN spans from the winding count of the crossings.
                     meshHits(pr, ro, rd, -INF, INF);
                     int winding = 0, n = 0;
                     float start = 0.0;
-                    for (int h = 0; h < MAXHITS; ++h)
+                    for (int h = 0; h < mN; ++h)
                     {
-                        if (h >= mN) break;
                         if (mIn[h])
                         {
                             if (winding++ == 0) start = mT[h];
@@ -467,7 +481,9 @@ void evaluate(vec3 ro, vec3 rd)
                     }
                     sN[sp] = n;
                 }
-                else if (intersectPrim(pr, ro, rd, t0, t1))
+                else
+#endif
+                if (intersectPrim(pr, ro, rd, t0, t1))
                 {
                     sT0[base] = t0; sT1[base] = t1;
                     sP0[base] = pi + 1; sP1[base] = pi + 1;
@@ -529,7 +545,11 @@ vec3 baseColor(Prim p)
 
 vec3 surfaceNormal(Prim p, int id, vec3 ro, vec3 rd, float t)
 {
+#if MESH_SUPPORT
     vec3 n = normalize(p.type == MESH ? meshNormal(p, ro, rd, t) : primNormal(p, ro + rd * t));
+#else
+    vec3 n = normalize(primNormal(p, ro + rd * t));
+#endif
     if (id < 0) n = -n; // boundary from a subtracted solid
     if (dot(n, rd) > 0.0) n = -n;
     return n;
@@ -620,7 +640,11 @@ vec3 rayTrace(vec3 ro, vec3 rd)
 // IN (inside the solid), ON (part of its boundary), OUT (cut away).
 vec3 smcView(vec3 ro, vec3 rd)
 {
+#if MESH_SUPPORT
     const int MAXH = 48;
+#else
+    const int MAXH = 32;
+#endif
     float hT[MAXH];
     vec3 hC[MAXH];
     float hA[MAXH];
@@ -633,18 +657,24 @@ vec3 smcView(vec3 ro, vec3 rd)
         Prim pr = loadPrim(i);
         float t0, t1;
         int surfaces = 2;
+#if MESH_SUPPORT
         if (pr.type == MESH)
         {
             meshHits(pr, ro, rd, 1e-4, INF);
             surfaces = mN;
         }
-        else if (!intersectPrim(pr, ro, rd, t0, t1))
+        else
+#endif
+        if (!intersectPrim(pr, ro, rd, t0, t1))
             continue;
 
-        for (int e = 0; e < MAXHITS; ++e)
+        for (int e = 0; e < surfaces; ++e)
         {
-            if (e >= surfaces) break;
+#if MESH_SUPPORT
             float t = pr.type == MESH ? mT[e] : e == 0 ? t0 : t1;
+#else
+            float t = e == 0 ? t0 : t1;
+#endif
             if (t <= 1e-4 || count >= MAXH) continue;
 
             float eps = 1e-4 * (1.0 + t);
@@ -656,7 +686,11 @@ vec3 smcView(vec3 ro, vec3 rd)
                 else if (t > sT0[k] && t < sT1[k]) inside = true;
             }
 
+#if MESH_SUPPORT
             vec3 n = normalize(pr.type == MESH ? meshTriNormal(pr, mTri[e]) : primNormal(pr, ro + rd * t));
+#else
+            vec3 n = normalize(primNormal(pr, ro + rd * t));
+#endif
             float shade = 0.35 + 0.65 * abs(dot(n, rd));
             vec3 c = (on ? COLOR_ON : inside ? COLOR_IN : COLOR_OUT) * shade;
             float a = on ? 0.9 : uSmcAlpha;
